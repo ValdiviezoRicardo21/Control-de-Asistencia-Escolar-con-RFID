@@ -1,0 +1,225 @@
+#include <Wire.h>                      // I2C communication
+#include <LiquidCrystal_I2C.h>         // LCD I2C
+#include <SPI.h>                       // SPI for RFID
+#include <MFRC522.h>                   // RFID
+#include <Keypad.h>                     // Keypad
+#include <WiFi.h>                       // WiFi
+#include <NTPClient.h>                  // NTP for internet time
+#include <WiFiUdp.h>                    // UDP for NTP
+#include <TimeLib.h>                     // Time handling
+
+// -----------------------------------------
+// PINES / PINS
+// -----------------------------------------
+#define SS_PIN 5
+#define RST_PIN 4
+#define BUZZER 27
+
+MFRC522 rfid(SS_PIN, RST_PIN);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Teclado 3x4
+const byte ROWS = 4;
+const byte COLS = 3;
+char keys[ROWS][COLS] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
+byte rowPins[ROWS] = {12,13,14,15};
+byte colPins[COLS] = {16,17,25};
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// -----------------------------------------
+// REDES WIFI / WIFI NETWORKS
+// -----------------------------------------
+struct WiFiNetwork { const char* ssid; const char* password; };
+WiFiNetwork networks[] = {
+  {"Lustar", "Luisana10MD"},
+  {"Xiaomi 14T", "3134yosoy"},
+  {"Estudiante", "Educar_2018"},
+  {"Starlu", "Luisana10MD"}
+};
+
+// NTP
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", -10800); // Argentina UTC-3
+
+// -----------------------------------------
+// ESTRUCTURA DE ALUMNOS / STUDENTS DATABASE
+// -----------------------------------------
+struct Student {
+  String uid;         // RFID UID
+  String name;
+  String dni;
+  String password;
+  String tutor_whatsapp;
+};
+
+Student students[] = {
+  {"9B8A6806", "Mateo González", "45892317", "102345", "3878410085"},
+  {"1174CC06", "Sofía Rodríguez", "46278154", "784512", "3878410085"},
+  {"A43F912C", "Lucas Fernández", "47123985", "556890", "3878410085"},
+  {"7DB24419", "Valentina López", "46987541", "998321", "3878410085"},
+  {"C85A103E", "Thiago Martínez", "47365892", "443210", "3878410085"},
+  {"2F9CD155", "Martina Pérez", "46821473", "667788", "3878410085"},
+  {"881E7A4B", "Benjamín Torres", "47590328", "321654", "3878410085"},
+  {"6C33F812", "Isabella Sánchez", "47014589", "890123", "3878410085"},
+  {"D90A6E77", "Joaquín Herrera", "47289635", "745612", "3878410085"},
+  {"3B4DA921", "Camila Ruiz", "46933210", "159753", "3878410085"},
+  {"9B8A6806", "Valdiviezo Ricardo Fabricio", "43760906", "3134", "3878357140"},
+  {"1174CC06", "Sanchez Juan", "23456789", "2710", "3878633163"}
+};
+
+// -----------------------------------------
+// TURNOS / SCHEDULES
+// -----------------------------------------
+struct Shift {
+  int startHour;
+  int startMin;
+  int endHour;
+  int endMin;
+};
+
+Shift morning = {7, 45, 12, 45};
+Shift afternoon = {13, 45, 18, 45};
+Shift night = {19, 15, 22, 45};
+int tolerance = 15; // minutos
+
+// -----------------------------------------
+// VARIABLES GLOBALES
+// -----------------------------------------
+String enteredPassword = "";
+bool registeringNewStudent = false;
+int starCount = 0;
+
+// -----------------------------------------
+// SETUP
+// -----------------------------------------
+void setup() {
+  Serial.begin(115200);                // Monitor serial (Serial Monitor)
+  SPI.begin();
+  rfid.PCD_Init();
+  lcd.init();
+  lcd.backlight();
+  pinMode(BUZZER, OUTPUT);
+
+  // Conexión a WiFi
+  connectToWiFi();
+
+  // Iniciar NTP
+  timeClient.begin();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Sistema Listo!");
+  delay(2000);
+}
+
+// -----------------------------------------
+// LOOP PRINCIPAL
+// -----------------------------------------
+void loop() {
+  timeClient.update();
+
+  // Leer teclado para registrar nuevo alumno
+  char key = keypad.getKey();
+  if(key == '*') {
+    starCount++;
+    if(starCount == 3) {
+      registeringNewStudent = true;
+      starCount = 0;
+      registerNewStudent();
+    }
+  }
+
+  // Leer RFID
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    String rfidUID = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      rfidUID += String(rfid.uid.uidByte[i], HEX);
+    }
+    rfidUID.toUpperCase();
+    handleStudentEntry(rfidUID); // Maneja ingreso por RFID
+  }
+
+  // Leer teclado para ingreso manual
+  if(key != NO_KEY && !registeringNewStudent) {
+    handleManualEntry(key);
+  }
+}
+
+// -----------------------------------------
+// FUNCIONES DE WIFI
+// -----------------------------------------
+void connectToWiFi() {
+  lcd.clear();
+  lcd.print("Conectando WiFi...");
+  for(int i=0; i<sizeof(networks)/sizeof(networks[0]); i++){
+    WiFi.begin(networks[i].ssid, networks[i].password);
+    lcd.setCursor(0,1);
+    lcd.print("Intentando: "); lcd.print(networks[i].ssid);
+    int tries = 0;
+    while(WiFi.status() != WL_CONNECTED && tries < 15) {
+      delay(1000);
+      lcd.print(".");
+      tries++;
+    }
+    if(WiFi.status() == WL_CONNECTED){
+      lcd.clear();
+      lcd.print("Conectado a: ");
+      lcd.setCursor(0,1);
+      lcd.print(networks[i].ssid);
+      Serial.println("Connected to WiFi");
+      return;
+    }
+  }
+  lcd.clear();
+  lcd.print("No se pudo conectar");
+}
+
+// -----------------------------------------
+// FUNCIONES DE ALUMNOS (simplificado)
+// -----------------------------------------
+void handleStudentEntry(String uid) {
+  for(int i=0;i<sizeof(students)/sizeof(students[0]);i++){
+    if(students[i].uid == uid){
+      lcd.clear();
+      lcd.print("Bienvenido:");
+      lcd.setCursor(0,1);
+      lcd.print(students[i].name);
+      playBuzzerCorrect();
+      // Aquí se pedirá contraseña con teclado
+      return;
+    }
+  }
+  lcd.clear();
+  lcd.print("RFID desconocido");
+  playBuzzerError();
+}
+
+void handleManualEntry(char key){
+  // Aquí se implementa lectura de DNI + contraseña
+}
+
+void registerNewStudent() {
+  lcd.clear();
+  lcd.print("Registrar nueva tarjeta");
+  delay(2000);
+  // Leer UID y DNI y contraseña y WhatsApp del tutor
+}
+
+void playBuzzerCorrect() {
+  for(int i=0;i<3;i++){
+    digitalWrite(BUZZER,HIGH);
+    delay(1000);
+    digitalWrite(BUZZER,LOW);
+    delay(500);
+  }
+}
+
+void playBuzzerError() {
+  digitalWrite(BUZZER,HIGH);
+  delay(5000);
+  digitalWrite(BUZZER,LOW);
+}
